@@ -33,6 +33,33 @@ Each project ships with its own evaluation (gold sets, test suites, latency benc
 
 <div align="center">
 
+## Evals
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/evals-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/evals-light.svg">
+  <img src="assets/evals-dark.svg" width="100%" alt="Radar charts. Nimbus RAG eval on a 24-case gold set: answer accuracy 0.83, numeric grounding 1.00, answer rate 18/18, correct refusals 6/6, page recall 0.87, citation recall 0.815. PriceOps agent eval: 13/13 on all seven metrics.">
+</picture>
+
+## Numbers
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/numbers-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/numbers-light.svg">
+  <img src="assets/numbers-dark.svg" width="100%" alt="0.980 ROC-AUC and 9.2 ms p95 latency (FinGuard), 0.83 RAG answer accuracy (Nimbus), 13/13 agent eval scenarios (PriceOps), 159 automated tests, 33.6 requests per second with 0% failures (Medicare Excellence)">
+</picture>
+
+<!-- refreshed weekly by .github/workflows/cards.yml -->
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/languages-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="assets/languages-light.svg">
+  <img src="assets/languages-dark.svg" width="100%" alt="Most used languages across public repos">
+</picture>
+
+</div>
+
+<div align="center">
+
 ## Stack
 
 <img src="https://skillicons.dev/icons?i=py,fastapi,nodejs,flask,postgres,mongodb,react,ts,vite,docker,githubactions,sklearn,tensorflow&perline=13" alt="Python, FastAPI, Node.js, Flask, PostgreSQL, MongoDB, React, TypeScript, Vite, Docker, GitHub Actions, scikit-learn, TensorFlow" />
@@ -47,4 +74,4 @@ Each project ships with its own evaluation (gold sets, test suites, latency benc
 - **Anthropic**: Introduction to Model Context Protocol
 - **LangChain**: Introduction to LangGraph
 
-<div align="center"><sub>Banner drawn by <a href="scripts/banner.py">scripts/banner.py</a>: a 1-bit Floyd–Steinberg dither of my photo, rendered as SVG.</sub></div>
+<div align="center"><sub>Banner and cards drawn by <a href="scripts">scripts/</a>: a 1-bit Floyd–Steinberg dither of my photo, and eval numbers copied from each project README.</sub></div>

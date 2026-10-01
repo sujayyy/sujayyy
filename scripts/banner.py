@@ -5,7 +5,8 @@ Build the animated terminal banner for the GitHub profile README.
   python3 scripts/banner.py --photo ~/Downloads/sujay-portfolio/src/assets/sujay-profile.png
 
 Writes assets/banner-dark.svg and assets/banner-light.svg. The portrait is a 1-bit
-Floyd-Steinberg dither of the photo (plain light background), drawn as round dots.
+Floyd-Steinberg dither of the photo (plain light background), drawn as round dots. On a
+loop, a share of those dots fly off to draw each shape in SCENES and then come home.
 Edit ROWS to change the info panel, then re-run and bump ?v= in README.md if GitHub
 serves a cached copy.
 
@@ -13,17 +14,20 @@ Requires: numpy, pillow, scipy.
 """
 import argparse
 import html
+import math
 import os
 
 import numpy as np
-from PIL import Image, ImageFilter, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from scipy import ndimage
+from scipy.optimize import linear_sum_assignment
+
+from theme import MONO, THEMES
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "..", "assets")
 
 W, H = 1180, 640
-MONO = "'JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace"
 CW = 0.6  # monospace advance, in em
 
 # portrait panel and its dot grid
@@ -51,13 +55,14 @@ ROWS = [
     ("linkedin", "/in/sujaybichala"),
 ]
 
-# colours follow the portfolio (src/index.css); light is its inverse for GitHub's light theme
-THEMES = {
-    "dark": dict(bg="#040406", panel="#0b0b10", panel2="#101017", line="#24242e", text="#e7e4dc",
-                 dim="#807e8a", faint="#3a3a44", ac="#b388ff", ok="#5fd38d", live="#ff6b6b"),
-    "light": dict(bg="#f6f5f1", panel="#ffffff", panel2="#f1f0ec", line="#e0ded6", text="#1d1c22",
-                  dim="#6b6975", faint="#c9c7c0", ac="#6a3fd0", ok="#1f9d55", live="#d64545"),
-}
+# the morph loop: the portrait holds, then dots travel to each scene in turn and back home.
+# Each scene is (footer label, info row it lights up). KT are the loop's key times:
+# hold portrait | travel | hold scene 1 | travel | hold 2 | travel | hold 3 | travel home | hold
+SCENES = [("AGENTS", "agents"), ("CODE", "role"), ("RAG", "retrieval")]
+KT = [0, .30, .36, .50, .56, .70, .76, .88, .95, 1]
+LOOP, LOOP_BEGIN = 15.0, 2.4
+TRAVELLERS = 1100
+SEED = 7
 
 
 def foreground(rgb, tol=28):
@@ -137,6 +142,100 @@ def portrait_dots(photo):
     return {"dark": dots(dark), "light": dots(light)}
 
 
+def scene_masks():
+    """400px white-on-black silhouettes, one per scene."""
+    S = 400
+
+    def canvas():
+        im = Image.new("L", (S, S), 0)
+        return im, ImageDraw.Draw(im)
+
+    # agents: an orchestrator wired to five specialists
+    agents, d = canvas()
+    sats = [(200 + 142 * math.cos(a), 200 + 142 * math.sin(a))
+            for a in (math.radians(-90 + 72 * i) for i in range(5))]
+    for x, y in sats:
+        d.line([(200, 200), (x, y)], fill=255, width=12)
+    d.ellipse((148, 148, 252, 252), fill=255)
+    for x, y in sats:
+        d.ellipse((x - 32, y - 32, x + 32, y + 32), fill=255)
+
+    # code: </>
+    code, d = canvas()
+    d.line([(150, 96), (60, 200), (150, 304)], fill=255, width=40, joint="curve")
+    d.line([(250, 96), (340, 200), (250, 304)], fill=255, width=40, joint="curve")
+    d.line([(230, 76), (170, 324)], fill=255, width=40)
+
+    # rag: a document under a magnifier, one retrieved line inside the lens
+    rag, d = canvas()
+    d.rounded_rectangle((60, 40, 250, 310), radius=16, outline=255, width=18)
+    for i, w in enumerate([128, 150, 104, 140, 90]):
+        d.rounded_rectangle((92, 84 + i * 38, 92 + w, 100 + i * 38), radius=8, fill=255)
+    cx, cy, r = 262, 262, 70
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=0)
+    d.ellipse((cx - r, cy - r, cx + r, cy + r), outline=255, width=22)
+    d.rounded_rectangle((cx - 38, cy - 9, cx + 38, cy + 9), radius=9, fill=255)
+    d.line([(cx + r * .72, cy + r * .72), (372, 372)], fill=255, width=30)
+
+    return [agents, code, rag]
+
+
+def sample(mask, n, rng):
+    """n points on a hex grid inside the mask, centred in the portrait grid."""
+    size = int(min(GW, GH) * 0.86)
+    m = np.asarray(mask.resize((size, size), Image.LANCZOS)) > 127
+    ox, oy = GX + (GW - size) / 2, GY + (GH - size) / 2
+
+    def grid(s):
+        pts = []
+        for j, y in enumerate(np.arange(s / 2, size, s * 0.866)):
+            for x in np.arange(s / 2 + (s / 2 if j % 2 else 0), size, s):
+                if m[int(y), int(x)]:
+                    pts.append((ox + x, oy + y))
+        return pts
+
+    lo, hi = 1.0, 30.0  # widest spacing that still yields n points
+    for _ in range(24):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if len(grid(mid)) >= n else (lo, mid)
+    pts = np.array(grid(lo))
+    return pts[rng.choice(len(pts), n, replace=False)]
+
+
+def travellers(pts, t):
+    """Dots that leave the portrait, draw each scene, and come back to where they started."""
+    rng = np.random.default_rng(SEED)
+    pts = np.array(pts)
+    home = pts[rng.choice(len(pts), TRAVELLERS, replace=False)]
+    stops, cur = [], home
+    for mask in scene_masks():
+        target = sample(mask, TRAVELLERS, rng)
+        cost = ((cur[:, None, :] - target[None, :, :]) ** 2).sum(-1)
+        _, col = linear_sum_assignment(cost)
+        cur = target[col]
+        stops.append(cur)
+
+    spl = ";".join("0 0 1 1" if i % 2 == 0 else ".6 0 .2 1" for i in range(len(KT) - 1))
+    # a left-to-right ripple: dots further right leave a little later
+    lag = 0.03 * (home[:, 0] - GX) / GW + rng.uniform(0, 0.008, TRAVELLERS)
+    out = [f'<g fill="{t["ac"]}">']
+    for i, (hx, hy) in enumerate(home):
+        kt = ";".join(f"{k + (lag[i] if 0 < k < 1 else 0):.3f}".rstrip("0").rstrip(".") for k in KT)
+        offs = [(0, 0)] + [tuple(s[i] - home[i]) for s in stops] + [(0, 0)]
+        vals = ";".join(f"{dx:.1f} {dy:.1f}" for dx, dy in [o for o in offs for _ in (0, 1)])
+        out.append(f'<circle cx="{hx:g}" cy="{hy:g}" r=".95"><animateTransform attributeName="transform" '
+                   f'type="translate" begin="{LOOP_BEGIN}s" dur="{LOOP}s" repeatCount="indefinite" '
+                   f'calcMode="spline" keyTimes="{kt}" keySplines="{spl}" values="{vals}"/></circle>')
+    out.append("</g>")
+    return "".join(out)
+
+
+def looped(attr, key_times, values, extra=""):
+    """A discrete animation on the morph loop's clock."""
+    return (f'<animate attributeName="{attr}" begin="{LOOP_BEGIN}s" dur="{LOOP}s" repeatCount="indefinite" '
+            f'calcMode="discrete" keyTimes="{key_times}" values="{values}"{extra}/>')
+
+
 def text(x, y, s, fill, size=14, anchor="start", weight=None, extra=""):
     w = f' font-weight="{weight}"' if weight else ""
     return (f'<text x="{x}" y="{y}" fill="{fill}" font-family="{MONO}" font-size="{size}"'
@@ -174,13 +273,23 @@ def build(theme, pts):
                            (GX - 6, GY + GH + 6, 1, -1), (GX + GW + 6, GY + GH + 6, -1, -1)]:
         o.append(f'<path d="M{x} {y + 12 * dy}V{y}H{x + 12 * dx}" fill="none" stroke="{t["faint"]}" stroke-width="1.5"/>')
     d = "".join(f"M{x:g} {y:g}h0" for x, y in pts)
-    o.append(f'<g clip-path="url(#reveal)"><path d="{d}" stroke="{t["ac"]}" stroke-width="1.85" stroke-linecap="round">'
-             f'<animate attributeName="opacity" begin="1.9s;flick.end+7s" dur="0.5s" values="1;.35;1;.6;1" id="flick"/></path></g>')
+    fade = (f'<animate attributeName="opacity" begin="{LOOP_BEGIN}s" dur="{LOOP}s" repeatCount="indefinite" '
+            f'keyTimes="0;{KT[1]};{KT[1] + .03:.2f};{KT[-2] - .02:.2f};{KT[-2] + .02:.2f};1" values="1;1;0;0;1;1"/>')
+    o.append(f'<g clip-path="url(#reveal)"><g>{fade}<path d="{d}" stroke="{t["ac"]}" stroke-width="1.85" stroke-linecap="round">'
+             f'<animate attributeName="opacity" begin="1.9s" dur="0.5s" values="1;.35;1;.6;1"/></path></g>'
+             f'{travellers(pts, t)}</g>')
     # recurring scanline
     o.append(f'<rect x="{GX - 10}" y="{GY - 40}" width="{GW + 20}" height="40" fill="url(#scan)" opacity="0">'
              f'<animate attributeName="y" begin="2.2s" dur="4.5s" repeatCount="indefinite" values="{GY - 40};{GY + GH}"/>'
              f'<animate attributeName="opacity" begin="2.2s" dur="4.5s" repeatCount="indefinite" values="0;1;1;0" keyTimes="0;.1;.85;1"/></rect>')
     o.append(text(PX + 14, PY + PH - 14, f"PTS {len(pts)} · FLOYD–STEINBERG", t["dim"], 11))
+    fx, fy = PX + PW - 14, PY + PH - 14
+    o.append(f'<g>{looped("opacity", f"0;{KT[1] + .01:.2f};{KT[-2]}", "1;0;1")}'
+             f'{text(fx, fy, "MODE ▸ PORTRAIT", t["ac"], 11, "end", "700")}</g>')
+    for i, (label, _) in enumerate(SCENES):
+        a, b = KT[2 * i + 1] + .03, KT[2 * i + 3] if 2 * i + 3 < len(KT) - 2 else KT[-3]
+        o.append(f'<g opacity="0">{looped("opacity", f"0;{a:.2f};{b:.2f}", "0;1;0")}'
+                 f'{text(fx, fy, f"MODE ▸ {label}", t["ac"], 11, "end", "700")}</g>')
 
     # info panel
     IX, IY, IW, IH = PX + PW + 20, PY, W - (PX + PW + 20) - 34, PH
@@ -212,6 +321,12 @@ def build(theme, pts):
     for el, i in head:
         o.append(f'<g opacity="0">{el}<animate attributeName="opacity" begin="{t0 + i * 0.05:.2f}s" dur=".25s" to="1" fill="freeze"/></g>')
     y += 24
+    keys = [k for k, _ in ROWS]
+    for i, (_, key) in enumerate(SCENES):
+        a, b = KT[2 * i + 1] + .03, KT[2 * i + 3] if 2 * i + 3 < len(KT) - 2 else KT[-3]
+        ry = y + keys.index(key) * lh
+        o.append(f'<rect x="{x0 - 10}" y="{ry - 17}" width="{IW - 24}" height="23" rx="4" fill="{t["ac"]}" '
+                 f'fill-opacity=".14" opacity="0">{looped("opacity", f"0;{a:.2f};{b:.2f}", "0;1;0")}</rect>')
     kw = 11
     for i, (k, v) in enumerate(ROWS):
         lead = "." * (kw - len(k))
